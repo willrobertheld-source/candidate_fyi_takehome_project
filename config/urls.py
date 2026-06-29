@@ -21,8 +21,7 @@ urlpatterns = [
     # User management
     path("users/", include("candidate_fyi_takehome_project.users.urls", namespace="users")),
     path("accounts/", include("allauth.urls")),
-    # Your stuff: custom urls includes go here
-    # ...
+    path("api/interviews/", include("candidate_fyi_takehome_project.interviews.urls")),
     # Media files
     *static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT),
 ]
