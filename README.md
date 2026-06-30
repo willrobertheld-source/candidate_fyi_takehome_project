@@ -269,5 +269,71 @@ If you prefer running the application without Docker:
    python manage.py runserver
    ```
 
+---
 
+## 🗂️ Design Decisions
+
+### App structure
+All new code lives in a dedicated `candidate_fyi_takehome_project/interviews/` Django app:
+
+| File | Purpose |
+|---|---|
+| `models.py` | `Interviewer` and `InterviewTemplate` models |
+| `services.py` | All interval arithmetic: merging, subtracting, intersecting, slot generation |
+| `serializers.py` | DRF serializers for response shaping |
+| `views.py` | HTTP layer only — delegates logic to `services.py` and `serializers.py` |
+| `urls.py` | Routes `<int:interview_id>/availability` to the view |
+| `admin.py` | Django admin registration for both models |
+| `migrations/` | Hand-written initial migration |
+
+This keeps the feature self-contained and consistent with the existing `users` app pattern.
+
+### Models
+- **`Interviewer`** — minimal model with just `id` and `name`. In a production system this would link to the `User` model, but the mock service only needs an integer ID, so keeping it simple avoids unnecessary coupling.
+- **`InterviewTemplate`** — holds `name`, `duration_minutes`, and a M2M to `Interviewer`. The duration drives all slot-length enforcement; putting it on the template (not the slot) means a single template change propagates everywhere.
+
+### Availability algorithm
+1. Call `get_free_busy_data(interviewer_ids)` to get busy blocks for all interviewers.
+2. **Merge overlapping busy blocks** per interviewer (see edge case below).
+3. For each interviewer, subtract their busy blocks from 9 am–5 pm working windows across the next 8 days, producing a list of free intervals.
+4. Intersect all interviewers' free-interval lists using a two-pointer sweep — O(n) per pair.
+5. Walk each jointly-free window and emit slots at `:00`/`:30` marks where the full duration fits.
+6. Enforce the 24-hour minimum lead time by clipping the working window start to `now + 24 h`.
+
+### Working-hours constraint
+The mock service generates busy blocks only within 9 am–5 pm UTC. Treating all other hours as "free" would produce valid-looking slots at 2 am or on Sunday nights. The implementation constrains slot search to the same 9–17 UTC band, which produces a realistic result and stays consistent with the mock data's intent.
+
+### Serializers
+Three DRF serializer classes handle response shaping:
+- `InterviewerSerializer` (ModelSerializer) — id + name from the DB
+- `AvailableSlotSerializer` (Serializer) — start/end strings for each computed slot
+- `InterviewAvailabilitySerializer` (ModelSerializer) — assembles the full response; receives computed slots via `context` so the view stays responsible for business logic and the serializer stays responsible for output format.
+
+### Authentication
+The availability endpoint uses `AllowAny` so it can be tested without a session or token. In production this would be tightened to require authentication.
+
+---
+
+## 🧠 Developer Insight: Edge Case
+
+### What the case was
+The external calendar service can return **overlapping busy blocks for the same interviewer** — for example, a recurring weekly team meeting (10:00–11:00) and a one-off event added on top of it (10:30–12:00) both appear as separate entries in the busy list for the same person.
+
+### Why it mattered
+The free-time calculation works by subtracting busy blocks from a working window. If two blocks overlap and are processed naively (without first merging them), the algorithm sees a gap between the end of the first block and the start of the second — even though the person is still busy during that gap. This produces phantom free windows inside a period when the interviewer is actually occupied, causing slots to be offered that cannot actually be booked.
+
+### How it was handled
+Before any free-time arithmetic is done, `merge_busy_blocks()` in `interviews/services.py` sorts all busy blocks by start time and merges any that overlap or are adjacent into a single contiguous block. The merged list is then what gets subtracted from the working window, eliminating any spurious free gaps. This runs once per interviewer per request and is O(n log n) due to the sort.
+
+```python
+def merge_busy_blocks(blocks):
+    sorted_blocks = sorted(blocks, key=lambda x: x[0])
+    merged = [list(sorted_blocks[0])]
+    for start, end in sorted_blocks[1:]:
+        if start <= merged[-1][1]:          # overlap or adjacent
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [tuple(b) for b in merged]
+```
 
